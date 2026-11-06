@@ -327,3 +327,130 @@ def test_nlp_create_q_and_kv_heads_separate_test(
     run_create_q_and_kv_heads_test(
         batch, q_seq_len, kv_seq_len, num_q_heads, num_kv_heads, head_dim, dtype, cores_h, cores_w, device, transpose_k
     )
+
+
+@pytest.mark.parametrize("orientation", [ttnn.ShardOrientation.ROW_MAJOR, ttnn.ShardOrientation.COL_MAJOR])
+@pytest.mark.parametrize("start_coord", [(0, 0), (1, 0), (0, 1), (1, 1)])
+@pytest.mark.parametrize("transpose_k", [False, True])
+def test_create_qkv_heads_offset_core_grids(device, orientation, start_coord, transpose_k):
+    torch.manual_seed(1234)
+    batch = 2
+    seq_len = 64
+    num_q_heads = 6
+    num_kv_heads = 6
+    head_dim = 64
+    cores_h, cores_w = 2, 2
+
+    grid_w, grid_h = (cores_w, cores_h) if orientation == ttnn.ShardOrientation.ROW_MAJOR else (cores_h, cores_w)
+    end_coord = (start_coord[0] + grid_w - 1, start_coord[1] + grid_h - 1)
+    core_grid = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(*start_coord), ttnn.CoreCoord(*end_coord))})
+
+    q_shape = [batch, 1, seq_len, num_kv_heads, (num_q_heads // num_kv_heads) * head_dim]
+    k_shape = [batch, 1, seq_len, num_kv_heads, head_dim]
+    v_shape = [batch, 1, seq_len, num_kv_heads, head_dim]
+
+    Q = (torch.randint(-16, 17, q_shape) / 8).to(torch.bfloat16)
+    K = (torch.randint(-16, 17, k_shape) / 8).to(torch.bfloat16)
+    V = (torch.randint(-16, 17, v_shape) / 8).to(torch.bfloat16)
+    QKV = torch.concat([Q.flatten(-2, -1), K.flatten(-2, -1), V.flatten(-2, -1)], -1)
+    QKV_interleaved = torch.concat([Q, K, V], -1).flatten(-2, -1)
+
+    in_shard_spec = ttnn.ShardSpec(
+        core_grid,
+        [(batch * seq_len) // cores_h, QKV_interleaved.shape[-1] // cores_w],
+        orientation,
+    )
+    in_mem_config = ttnn.MemoryConfig(ttnn.TensorMemoryLayout.BLOCK_SHARDED, ttnn.BufferType.L1, in_shard_spec)
+    out_mem_config = ttnn.MemoryConfig(ttnn.TensorMemoryLayout.HEIGHT_SHARDED, ttnn.BufferType.L1, in_shard_spec)
+
+    in_t = ttnn.from_torch(
+        QKV_interleaved, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device, memory_config=in_mem_config
+    )
+    q, k, v = ttnn.experimental.create_qkv_heads(
+        in_t,
+        num_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        transpose_k_heads=transpose_k,
+        memory_config=out_mem_config,
+    )
+
+    ref_q, ref_k, ref_v = torch.split(
+        QKV, [num_q_heads * head_dim, num_kv_heads * head_dim, num_kv_heads * head_dim], dim=-1
+    )
+    ref_q = torch.reshape(ref_q, [batch, seq_len, num_q_heads, head_dim]).transpose(-3, -2)
+    ref_k = torch.reshape(ref_k, [batch, seq_len, num_kv_heads, head_dim]).transpose(-3, -2)
+    ref_v = torch.reshape(ref_v, [batch, seq_len, num_kv_heads, head_dim]).transpose(-3, -2)
+    if transpose_k:
+        ref_k = torch.transpose(ref_k, -2, -1)
+
+    assert torch.equal(ttnn.to_torch(q), ref_q)
+    assert torch.equal(ttnn.to_torch(k), ref_k)
+    assert torch.equal(ttnn.to_torch(v), ref_v)
+
+
+@pytest.mark.parametrize("orientation", [ttnn.ShardOrientation.ROW_MAJOR, ttnn.ShardOrientation.COL_MAJOR])
+@pytest.mark.parametrize("start_coord", [(0, 0), (1, 0), (0, 1), (1, 1)])
+@pytest.mark.parametrize("transpose_k", [False, True])
+def test_create_qkv_heads_from_separate_tensors_offset_core_grids(device, orientation, start_coord, transpose_k):
+    torch.manual_seed(1234)
+    batch = 2
+    q_seq_len = 64
+    kv_seq_len = 64
+    num_q_heads = 6
+    num_kv_heads = 6
+    head_dim = 64
+    cores_h, cores_w = 2, 2
+
+    grid_w, grid_h = (cores_w, cores_h) if orientation == ttnn.ShardOrientation.ROW_MAJOR else (cores_h, cores_w)
+    end_coord = (start_coord[0] + grid_w - 1, start_coord[1] + grid_h - 1)
+    core_grid = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(*start_coord), ttnn.CoreCoord(*end_coord))})
+
+    Q = (torch.randint(-16, 17, [batch, 1, q_seq_len, num_q_heads, head_dim]) / 8).to(torch.bfloat16)
+    K = (torch.randint(-16, 17, [batch, 1, kv_seq_len, num_kv_heads, head_dim]) / 8).to(torch.bfloat16)
+    V = (torch.randint(-16, 17, [batch, 1, kv_seq_len, num_kv_heads, head_dim]) / 8).to(torch.bfloat16)
+
+    KV = torch.concat([K.flatten(-2, -1), V.flatten(-2, -1)], -1)
+    KV_interleaved = torch.concat([K, V], -1).flatten(-2, -1)
+    Q_flattened = Q.flatten(-2, -1)
+
+    q_shard_spec = ttnn.ShardSpec(
+        core_grid,
+        [(batch * q_seq_len) // cores_h, Q_flattened.shape[-1] // cores_w],
+        orientation,
+    )
+    kv_shard_spec = ttnn.ShardSpec(
+        core_grid,
+        [(batch * kv_seq_len) // cores_h, KV_interleaved.shape[-1] // cores_w],
+        orientation,
+    )
+
+    q_mem_config = ttnn.MemoryConfig(ttnn.TensorMemoryLayout.BLOCK_SHARDED, ttnn.BufferType.L1, q_shard_spec)
+    kv_mem_config = ttnn.MemoryConfig(ttnn.TensorMemoryLayout.BLOCK_SHARDED, ttnn.BufferType.L1, kv_shard_spec)
+    out_mem_config = ttnn.MemoryConfig(ttnn.TensorMemoryLayout.HEIGHT_SHARDED, ttnn.BufferType.L1)
+
+    q_t = ttnn.from_torch(
+        Q_flattened, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device, memory_config=q_mem_config
+    )
+    kv_t = ttnn.from_torch(
+        KV_interleaved, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device, memory_config=kv_mem_config
+    )
+
+    q, k, v = ttnn.experimental.create_qkv_heads_from_separate_tensors(
+        q_t,
+        kv_t,
+        num_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        transpose_k_heads=transpose_k,
+        memory_config=out_mem_config,
+    )
+
+    ref_k, ref_v = torch.split(KV, [num_kv_heads * head_dim, num_kv_heads * head_dim], dim=-1)
+    ref_q = torch.reshape(Q_flattened, [batch, q_seq_len, num_q_heads, head_dim]).transpose(-3, -2)
+    ref_k = torch.reshape(ref_k, [batch, kv_seq_len, num_kv_heads, head_dim]).transpose(-3, -2)
+    ref_v = torch.reshape(ref_v, [batch, kv_seq_len, num_kv_heads, head_dim]).transpose(-3, -2)
+    if transpose_k:
+        ref_k = torch.transpose(ref_k, -2, -1)
+
+    assert torch.equal(ttnn.to_torch(q), ref_q)
+    assert torch.equal(ttnn.to_torch(k), ref_k)
+    assert torch.equal(ttnn.to_torch(v), ref_v)

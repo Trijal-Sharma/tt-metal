@@ -62,3 +62,60 @@ def test_split_query_key_value_and_split_heads_interleaved(device, batch, num_he
         p, o = comp_pcc(got, ref)
         logger.info(f"{name} {o}")
         assert p, f"{name} mismatch with num_heads={num_heads}"
+
+
+@pytest.mark.parametrize("orientation", [ttnn.ShardOrientation.ROW_MAJOR, ttnn.ShardOrientation.COL_MAJOR])
+@pytest.mark.parametrize("start_coord", [(0, 0), (1, 0), (0, 1), (1, 1)])
+def test_split_query_key_value_and_split_heads_sharded_offset_core_grids(device, orientation, start_coord):
+    compute_grid_size = device.compute_with_storage_grid_size()
+    cores_h, cores_w = 2, 2
+    grid_w, grid_h = (cores_w, cores_h) if orientation == ttnn.ShardOrientation.ROW_MAJOR else (cores_h, cores_w)
+    end_coord = (start_coord[0] + grid_w - 1, start_coord[1] + grid_h - 1)
+    if end_coord[0] >= compute_grid_size.x or end_coord[1] >= compute_grid_size.y:
+        pytest.skip(f"Grid size {compute_grid_size} cannot fit {end_coord}")
+
+    torch.manual_seed(1234)
+    batch = cores_h
+    seq_len = 64
+    num_heads_per_core = 2
+    num_heads = cores_w * num_heads_per_core
+    head_dim = 64
+    hidden = 3 * num_heads * head_dim
+
+    q_part = (torch.randint(-16, 17, [batch, 1, seq_len, cores_w, num_heads_per_core * head_dim]) / 8).to(
+        torch.bfloat16
+    )
+    k_part = (torch.randint(-16, 17, [batch, 1, seq_len, cores_w, num_heads_per_core * head_dim]) / 8).to(
+        torch.bfloat16
+    )
+    v_part = (torch.randint(-16, 17, [batch, 1, seq_len, cores_w, num_heads_per_core * head_dim]) / 8).to(
+        torch.bfloat16
+    )
+    fused_interleaved = torch.concat([q_part, k_part, v_part], dim=-1).reshape(batch, 1, seq_len, hidden)
+
+    core_grid = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(*start_coord), ttnn.CoreCoord(*end_coord))})
+    in_shard_spec = ttnn.ShardSpec(
+        core_grid,
+        [(batch * seq_len) // cores_h, hidden // cores_w],
+        orientation,
+    )
+    in_mem_config = ttnn.MemoryConfig(ttnn.TensorMemoryLayout.BLOCK_SHARDED, ttnn.BufferType.L1, in_shard_spec)
+    out_mem_config = ttnn.MemoryConfig(ttnn.TensorMemoryLayout.HEIGHT_SHARDED, ttnn.BufferType.L1)
+
+    xt = ttnn.from_torch(
+        fused_interleaved, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device, memory_config=in_mem_config
+    )
+    q, k, v = ttnn.experimental.split_query_key_value_and_split_heads(
+        xt,
+        ttnn.CoreCoord(compute_grid_size.x, compute_grid_size.y),
+        memory_config=out_mem_config,
+        num_heads=num_heads,
+    )
+
+    ref_q = q_part.reshape(batch, seq_len, num_heads, head_dim).transpose(-3, -2)
+    ref_k = k_part.reshape(batch, seq_len, num_heads, head_dim).transpose(-3, -2).transpose(-2, -1)
+    ref_v = v_part.reshape(batch, seq_len, num_heads, head_dim).transpose(-3, -2)
+
+    assert torch.equal(ttnn.to_torch(q), ref_q)
+    assert torch.equal(ttnn.to_torch(k), ref_k)
+    assert torch.equal(ttnn.to_torch(v), ref_v)

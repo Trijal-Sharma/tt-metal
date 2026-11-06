@@ -48,11 +48,18 @@ void CreateQKVHeadsSeparateTensorsDeviceOperation::validate_on_program_cache_mis
         kv_input_tensor.memory_config().memory_layout() == TensorMemoryLayout::BLOCK_SHARDED,
         "KV input tensor memory layout must be BLOCK_SHARDED but got {}",
         kv_input_tensor.memory_config().memory_layout());
+    TT_FATAL(
+        kv_input_tensor.shard_spec().value().grid == q_input_tensor.shard_spec().value().grid,
+        "Q and KV input tensors must have the same shard grid");
+    TT_FATAL(
+        kv_input_tensor.shard_spec().value().orientation == q_input_tensor.shard_spec().value().orientation,
+        "Q and KV input tensors must have the same shard orientation");
 
     ShardOrientation shard_orientation = q_input_tensor.shard_spec().value().orientation;
     bool rm = shard_orientation == ShardOrientation::ROW_MAJOR;
-    uint32_t num_h_cores = rm ? bbox.end_coord.y + 1 : bbox.end_coord.x + 1;
-    uint32_t num_w_cores = rm ? bbox.end_coord.x + 1 : bbox.end_coord.y + 1;
+    const auto grid_size = bbox.grid_size();
+    uint32_t num_h_cores = rm ? grid_size.y : grid_size.x;
+    uint32_t num_w_cores = rm ? grid_size.x : grid_size.y;
 
     TT_FATAL(
         operation_attributes.num_q_heads > 0 && operation_attributes.num_kv_heads > 0,
@@ -124,7 +131,7 @@ void CreateQKVHeadsSeparateTensorsDeviceOperation::validate_on_program_cache_mis
         (q_input_shape[3]) /
         (num_w_cores * TILE_WIDTH);  // number of tiles in width dimension  - multiple tiles per head, multiple heads
                                      // per group, multiple tensors in group, multiple groups per cores
-    uint32_t q_shard_ht = ((q_input_shape[0] * q_input_shape[2]) / (num_w_cores * TILE_HEIGHT));
+    uint32_t q_shard_ht = ((q_input_shape[0] * q_input_shape[2]) / (num_h_cores * TILE_HEIGHT));
     uint32_t k_shard_wt = (kv_input_shape[3] / (2 * num_w_cores * TILE_WIDTH));
     uint32_t k_shard_ht = ((kv_input_shape[0] * kv_input_shape[2]) / (num_h_cores * TILE_HEIGHT));
 

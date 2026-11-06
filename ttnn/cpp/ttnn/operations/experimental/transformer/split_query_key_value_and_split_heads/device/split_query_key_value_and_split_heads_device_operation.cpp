@@ -88,8 +88,9 @@ SplitFusedQKVAndSplitHeadsDeviceOperation::compute_output_specs(
         CoreRangeSet all_cores = input_tensor.shard_spec().value().grid;
         tt::tt_metal::ShardOrientation shard_orientation = input_tensor.shard_spec().value().orientation;
         auto bbox = all_cores.bounding_box();
-        uint32_t num_M_cores = shard_orientation == tt::tt_metal::ShardOrientation::ROW_MAJOR ? bbox.end_coord.x + 1
-                                                                                              : bbox.end_coord.y + 1;
+        const auto grid_size = bbox.grid_size();
+        uint32_t num_M_cores = shard_orientation == tt::tt_metal::ShardOrientation::ROW_MAJOR ? grid_size.x
+                                                                                              : grid_size.y;
         // shard spec
         uint32_t per_core_M_qv = (num_heads / num_M_cores) * M;  // 768
         uint32_t per_core_N_qv = K;                              // 64
