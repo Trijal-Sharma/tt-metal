@@ -120,6 +120,8 @@ repos:
       name: Convert .ipynb to .py for ttnn basic examples
       entry: python3 scripts/convert_notebooks_to_python.py
       language: system
+      # The script only converts staged notebooks under ttnn/tutorials.
+      files: ^ttnn/tutorials/.*\.ipynb$
 - repo: local
   hooks:
     - id: detect-legacy-device-op
