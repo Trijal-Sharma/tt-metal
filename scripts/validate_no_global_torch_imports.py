@@ -2,10 +2,23 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Reject a module-level torch import under ttnn/ttnn.
+
+With filenames, only those files are checked. This is what pre-commit passes.
+With no filenames, the whole ttnn/ttnn tree is scanned.
+"""
+
 import ast
-import os
 import sys
 from pathlib import Path
+
+TTNN_DIR = Path(__file__).resolve().parent.parent / "ttnn" / "ttnn"
+# Allowed to import torch at module scope. `examples` is the directory.
+EXCEPTIONS = (
+    "examples",
+    "model_preprocessing.py",
+    "torch_tracer.py",
+)
 
 
 class TorchImportVisitor(ast.NodeVisitor):
@@ -43,6 +56,16 @@ class TorchImportVisitor(ast.NodeVisitor):
         self.scope_level -= 1
 
 
+def is_exception(path):
+    try:
+        rel = path.resolve().relative_to(TTNN_DIR)
+    except ValueError:
+        return False
+    if rel.parts and rel.parts[0] == "examples":
+        return True
+    return rel.as_posix() in EXCEPTIONS[1:]
+
+
 def check_file(filepath):
     with open(filepath, "r", encoding="utf-8") as file:
         try:
@@ -55,44 +78,51 @@ def check_file(filepath):
             return [(0, f"Failed to parse {filepath}")]
 
 
-def main():
-    ttnn_dir = Path(__file__).parent.parent / "ttnn" / "ttnn"
-    if not ttnn_dir.exists():
-        print(f"Error: ttnn directory not found at {ttnn_dir}")
-        sys.exit(1)
+def _under_ttnn(path):
+    try:
+        path.resolve().relative_to(TTNN_DIR)
+    except ValueError:
+        return False
+    return True
 
-    exceptions = [
-        "examples",
-        "model_preprocessing.py",
-        "torch_tracer.py",
-    ]
-    exceptions_paths = [os.path.join(ttnn_dir, path) for path in exceptions]
 
+def iter_files(filenames):
+    if filenames:
+        for name in filenames:
+            path = Path(name)
+            if not path.is_absolute():
+                path = Path.cwd() / path
+            if path.suffix == ".py" and path.is_file() and _under_ttnn(path) and not is_exception(path):
+                yield path
+        return
+    for path in TTNN_DIR.rglob("*.py"):
+        if path.is_file() and not is_exception(path):
+            yield path
+
+
+def main(argv=None):
+    if not TTNN_DIR.is_dir():
+        print(f"Error: ttnn directory not found at {TTNN_DIR}")
+        return 1
+
+    filenames = sys.argv[1:] if argv is None else argv
     violations = []
-
-    for root, _, files in os.walk(ttnn_dir):
-        for file in files:
-            if file.endswith(".py"):
-                filepath = os.path.join(root, file)
-
-                # Check if this specific file is in exceptions list
-                if any(filepath.startswith(wp) for wp in exceptions_paths):
-                    continue
-
-                imports = check_file(filepath)
-                if imports:
-                    for line, import_stmt in imports:
-                        violations.append(f"{filepath}:{line}: {import_stmt}")
+    for filepath in iter_files(filenames):
+        for line, import_stmt in check_file(filepath):
+            violations.append(f"{filepath}:{line}: {import_stmt}")
 
     if violations:
         print("Global torch imports found:")
         for violation in violations:
             print(violation)
-        sys.exit(1)
+        return 1
+
+    if filenames:
+        print("No global torch imports found in the given files.")
     else:
         print("No global torch imports found in ttnn/ directory.")
-        sys.exit(0)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
