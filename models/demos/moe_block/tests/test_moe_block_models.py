@@ -281,6 +281,11 @@ CASES = [
     BlockCase("glm53", "8x4", 5120),
     BlockCase("glm53", "8x4", 10240),
     BlockCase("glm53", "4x4-y", 5120),
+    BlockCase("glm53", "4x4-y", 10240),  # (local baselines: the SP-ring 10240 point, K3 past the old head L1 limit)
+    BlockCase("kimi_k3", "8x4", 10240),
+    BlockCase("kimi_k3", "4x4-y", 5120),
+    BlockCase("kimi_k3", "4x4-y", 7680),
+    BlockCase("kimi_k3", "4x4-y", 10240),
     BlockCase("glm53", "4x4-xy", 7680),
     BlockCase("kimi_k3", "8x4", 5120),
     BlockCase("kimi_k3", "4x4-y", 2560),
