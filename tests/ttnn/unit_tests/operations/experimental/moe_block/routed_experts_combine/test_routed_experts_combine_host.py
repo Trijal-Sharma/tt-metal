@@ -46,7 +46,7 @@ def test_credit_policy():
 def test_auto_invariants():
     """Self-contained (no reference): what combine_auto picks fits the arena and holds a slot per source chip."""
     for (N, S, W), arena in itertools.product(SHAPES, ARENAS):
-        for cells, ports in ((19, 8), (30, 8)):
+        for cells, ports in ((19, 8), (30, 8), (40, 8)):
             got = mb.combine_auto(N, S, W, cells, ports, arena_bytes=arena)
             if not got["fits"]:
                 assert got["why"]
@@ -55,6 +55,7 @@ def test_auto_invariants():
             assert lay["fits"] and lay["PSL"] >= N - 1 and lay["PSL"] < 4096
             assert max(lay["acc_used"], lay["port_used"]) <= arena
             assert 1 <= got["n_acc"] <= 32  # (kAccMax)
+            assert got["n_acc"] + ports <= 32  # (the y writers' hand-off destinations: ports, then accumulators)
     counts = collections.Counter(len(mb.combine_state_layout(N, A)) for N in (8, 32) for A in (1, 16))
     assert counts == {10: 4}
 

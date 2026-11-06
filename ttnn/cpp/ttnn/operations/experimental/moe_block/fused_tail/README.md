@@ -57,5 +57,5 @@ Counters only count up or are re-armed by their waiters: traced replays need no 
 
 ## Tests
 
-`tests/ttnn/unit_tests/operations/experimental/moe_block/fused_tail/`:
-- `test_fused_tail.py`: bit-exact against saved reference cases (`$MOE_BLOCK_REFS`).
+- `tests/ttnn/unit_tests/operations/experimental/moe_block/test_fused_head_tail_lb.py` (a LoudBox, SP 2 x TP 4; GLM-5.3 and Kimi-K3): accuracy vs torch,
+  determinism and traced device time.

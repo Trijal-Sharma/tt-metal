@@ -78,7 +78,12 @@ def _combine_config(mb, opts: "MoEBlockFfnOptions"):
 
 
 def block_dims(model_cfg):
-    """The block's MoEModelDims (GLM-5.3 / Kimi-K3), checked against the model's config."""
+    """The block's MoEModelDims (GLM-5.3 / Kimi-K3), checked against the model's config - or a config's own
+    moe_block_dims() -> (MoEModelDims, flat activation name), for a model the block runs without a branch here (the block
+    tests' DeepSeek V4.1-Flash)."""
+    own = getattr(model_cfg, "moe_block_dims", None)
+    if own is not None:
+        return own()
     mb = ttnn.experimental.moe_block
     E, K, H, I = (
         model_cfg.NUM_ROUTED_EXPERTS,

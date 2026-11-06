@@ -1,11 +1,9 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""What the flat routed expert's tests and its reference dump share: the model shapes, the per-chip load at a stage,
-the seeded inputs of a case. Imports neither ttnn nor the op at import time (the dump runs in the reference tree)."""
+"""What the flat routed expert's tests share: the model shapes, the per-chip load at a stage, the seeded weights and
+inputs of a case. Imports neither ttnn nor the op."""
 
 from __future__ import annotations
-
-import hashlib
 
 import torch
 
@@ -23,13 +21,6 @@ N_W = 4  # distinct weight sets, round-robin over the experts (a neighbour's wei
 W_SCALE = 0.02
 W_SEED = 0
 
-# (model, chunk, y_row_major): the reference cases, each one chip at the Galaxy 8x4 per-chip load
-REF_CASES = [("glm53", 5120, False), ("glm53", 5120, True), ("k3", 5120, False)]
-
-
-def case_name(model, chunk, y_row_major):
-    return f"{model}-{chunk}" + ("-rm" if y_row_major else "")
-
 
 def per_chip(model, stage, chunk):
     """dict(chips, epc (experts per chip), S (home tokens per chip), M (tokens per expert, uniform))."""
@@ -44,15 +35,6 @@ def weight_sets(H, I, seed=W_SEED):
     """The N_W (Wg [H, I], Wu [H, I], Wd [I, H]) float32 weight sets of a case, regenerated from the seed."""
     torch.manual_seed(seed)
     return [tuple(torch.randn(*sh) * W_SCALE for sh in ((H, I), (H, I), (I, H))) for _ in range(N_W)]
-
-
-def weights_digest(wsets):
-    """sha256 of the weight sets' bytes: the reference records it, the test checks it regenerated the same weights."""
-    h = hashlib.sha256()
-    for ws in wsets:
-        for w in ws:
-            h.update(w.contiguous().numpy().tobytes())
-    return h.hexdigest()
 
 
 def uniform_counts(E_glob, K, epc, chunk, seed):
@@ -81,7 +63,3 @@ def case_inputs(model, chunk, seed=1):
         c_[0, gid], r_[0, gid] = counts[e], offs[e]
     return x, c_, r_, gids, list(zip(offs, counts))
 
-
-# The plan fields the reference records and the test compares (the layout the weights and the program follow).
-PLAN_KEYS = ("n_rd", "np", "nu", "rg", "mt", "nk_gu", "nd", "pcds", "col0s", "banks", "wd_rot_tiles")
-PLAN_CORE_KEYS = ("gu", "down", "relays", "coords")

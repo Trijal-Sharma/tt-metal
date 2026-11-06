@@ -160,7 +160,9 @@ CombineAuto combine_auto(
     };
     for (const bool fused : {false, true}) {
         const int64_t cells = fused ? static_cast<int64_t>(n_cells) : static_cast<int64_t>(n_cells) - port_cells;
-        const int64_t A = std::min<int64_t>(a_max, cells);
+        // (the y writers address the chip's ports, then every accumulator: at most kHandoffDests destinations -
+        // DeepSeek V4.1-Flash's narrower rows leave cells for 27 accumulators, 35 destinations with its 8 ports)
+        const int64_t A = std::min<int64_t>({static_cast<int64_t>(a_max), cells, int64_t(kHandoffDests) - port_cells});
         const char* name = fused ? "acc_on_ports" : "ports apart";
         if (mode.has_value() && *mode != (fused ? CombineMode::AccOnPorts : CombineMode::PortsApart)) {
             continue;

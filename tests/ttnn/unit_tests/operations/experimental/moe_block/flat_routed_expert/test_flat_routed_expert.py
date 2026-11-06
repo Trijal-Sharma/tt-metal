@@ -4,11 +4,9 @@
 
 * test_flat_routed_expert_pcc: GLM-5.3-Flash at the Galaxy per-chip load against a torch reference of the
   bfp4-quantized weights, two calls (the second with a moved arena: the cache hit must patch every address).
-* test_flat_routed_expert_bit_exact: bit-exact against saved reference outputs; runs only with MOE_BLOCK_REFS set.
 """
 
 import importlib.util
-import os
 from pathlib import Path
 
 import pytest
@@ -19,7 +17,6 @@ from models.common.utility_functions import comp_pcc
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[6]
-OP = "flat_routed_expert"
 
 
 def _load(name, path):
@@ -30,7 +27,6 @@ def _load(name, path):
 
 
 cases = _load("flat_cases", HERE / "flat_cases.py")
-harness = _load("moe_block_ref_harness", HERE.parent / "ref_harness.py")
 weights_py = _load(
     "flat_routed_expert_weights",
     REPO / "ttnn/cpp/ttnn/operations/experimental/moe_block/flat_routed_expert/flat_routed_expert_weights.py",
@@ -42,10 +38,6 @@ def _skip_unless_supported(device):
         pytest.skip("Blackhole only")
     if device.compute_with_storage_grid_size().y < 10:
         pytest.skip("laid out for a 10-row Blackhole grid")
-
-
-def _bits(t):
-    return t.contiguous().view({2: torch.int16, 4: torch.int32}[t.element_size()])
 
 
 def _rm(t, dt, device):
@@ -115,49 +107,3 @@ def test_flat_routed_expert_pcc(device):
         )
     op.close()
 
-
-@pytest.mark.timeout(3600)
-@pytest.mark.skipif("MOE_BLOCK_REFS" not in os.environ, reason="reference outputs: set MOE_BLOCK_REFS")
-@pytest.mark.parametrize("device_params", [{"l1_small_size": 0}], indirect=True)
-@pytest.mark.parametrize("case", harness.list_cases(OP) or ["none"])
-def test_flat_routed_expert_bit_exact(device, case):
-    if case == "none":
-        pytest.skip(f"no saved {OP} case under {harness.REFS_ROOT}")
-    _skip_unless_supported(device)
-    meta, ref = harness.load_case(OP, case)
-    cfg, chip = meta["config"], ref[(0, 0)]
-    wsets = cases.weight_sets(cfg["H"], cfg["I"], meta["weights"]["seed"])
-    assert cases.weights_digest(wsets) == meta["weights"]["sha256"], "the weights did not regenerate bit for bit"
-    op = weights_py.FlatRoutedExpert(
-        device,
-        [[wsets[e % cases.N_W] for e in range(cfg["E"])]],
-        m=cfg["m"],
-        H=cfg["H"],
-        I=cfg["I"],
-        gids=[chip["global_expert_ids"].tolist()],
-        n_global=cfg["NG"],
-        act=cfg["act"],
-        pin=cfg["pin"],
-        # (the saved case's layout fields the op still has)
-        layout={k: v for k, v in (cfg["layout"] or {}).items() if k in weights_py.FLAT_LAYOUT_FIELDS},
-    )
-    lay = op.lay
-    for k in cases.PLAN_KEYS:
-        assert lay[k] == meta["plan"][k], (k, lay[k], meta["plan"][k])
-    for k in cases.PLAN_CORE_KEYS:
-        assert [list(c) for c in lay[k]] == meta["plan"][k], k
-    y = op(
-        _rm(chip["x"], ttnn.bfloat16, device),
-        _rm(chip["counts"], ttnn.uint32, device),
-        _rm(chip["regions"], ttnn.uint32, device),
-        y_row_major=cfg["y_row_major"],
-    )
-    y = ttnn.to_torch(y)
-    want = chip["y"]
-    assert y.dtype == want.dtype and y.shape == want.shape, (y.dtype, y.shape, want.dtype, want.shape)
-    # (only the active experts' rows are written: the rest of y is whatever the allocation held)
-    for e, (o, c) in enumerate(cfg["spans"]):
-        got, exp = y[o : o + c], want[o : o + c]
-        bad = (_bits(got) != _bits(exp)).sum()
-        assert int(bad) == 0, f"{case}: expert {e} ({c} rows at {o}): {int(bad)} elements differ"
-    op.close()

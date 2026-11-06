@@ -36,6 +36,9 @@ inline constexpr uint32_t kWriterWordsRows = 192;       // the L1 hand-off write
 // shared landing: slot grants outstanding a (source, accumulator) at most (4: 2x4 GLM-5.3-Flash 1280 experts + combine
 // 560 / 694 / 1157 us at D 8 / 2 / 1 vs 584 / 688 / 1172 at 8, 591 / 699 / 1194 at 16)
 inline constexpr uint32_t kGrants = 4;
+// the y writers' L1 hand-off destinations at most (y_row_major.hpp SeYRmWriter::L1_MAXD; flat_program.hpp kFlatYL1Args):
+// a chip's ports and its accumulators together
+inline constexpr uint32_t kHandoffDests = 32;
 inline constexpr uint32_t kSharedPslMax = 254;  // shared landing in the accumulators' L1: slots an accumulator at most
 inline constexpr uint32_t kSharedFlatPslMax = 1024;  // ... on the flat cells (slot ids 16-bit, owners bytes)
 

@@ -68,5 +68,5 @@ every core; another op rebuilds it from the counts with `flat_schedule_defines`.
 ## Tests
 
 `tests/ttnn/unit_tests/operations/experimental/moe_block/flat_routed_expert/`: `test_flat_routed_expert.py` (device:
-PCC vs torch, bit-exact vs saved reference outputs with `MOE_BLOCK_REFS`), `test_flat_routed_expert_host.py` (host
-only: weight layout).
+PCC vs torch), `test_flat_routed_expert_checks.py` (one chip: accuracy, determinism and device time over models and
+routings), `test_flat_routed_expert_host.py` (host only: weight layout).

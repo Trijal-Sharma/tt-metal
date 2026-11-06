@@ -14,6 +14,8 @@ packing is torch work on the host, done once per weight set, so it stays in Pyth
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import torch
 
 import ttnn
@@ -156,6 +158,35 @@ def bank_sharded(regions_per_dev, banks, dtype, mesh_device, replicate=False):
     return host.to(mesh_device, mc)
 
 
+class PackedFlatWeights(NamedTuple):
+    """One device's experts in a plan's bank layout, converted on the host (bank_sharded's replicated tensors before
+    the upload): packed once, uploaded to any mesh whose plan lays them out the same (FlatRoutedExpert's weights)."""
+
+    lay: dict  # (the plan's as_dict the regions were cut for)
+    w_gu: ttnn.Tensor
+    w_d: ttnn.Tensor
+
+
+def pack_flat_weights(W_l, lay, dtype) -> PackedFlatWeights:
+    """One device's experts (Wg [H, I], Wu [H, I], Wd [I, H] each) -> PackedFlatWeights on the host."""
+    banks = lay["banks"]
+
+    def host(regions):
+        h = bank_host_tensor(regions, banks)
+        return ttnn.from_torch(
+            h, dtype=dtype, layout=ttnn.TILE_LAYOUT, memory_config=_bank_memory_config(h.shape[0], banks)
+        )
+
+    regions, dregs = flat_weight_regions(W_l, lay)
+    return PackedFlatWeights(lay, host(regions), host(dregs))
+
+
+def upload_flat_weights(packed: PackedFlatWeights, mesh_device):
+    """(w_gu, w_d) on the device, the same on every chip."""
+    banks = packed.lay["banks"]
+    return tuple(t.to(mesh_device, _bank_memory_config(t.shape[0], banks)) for t in (packed.w_gu, packed.w_d))
+
+
 def uninitialized_bank_sharded(n_regions, region_tiles, banks, dtype, mesh_device):
     """An uninitialised device tensor with bank_sharded's spec (perf runs: the bfp matmuls take the same time whatever
     the bytes are, so the host packing and upload are skipped)."""
@@ -188,8 +219,10 @@ class FlatRoutedExpert:
     its bank layout, the expert id table and the done words, kept across calls.
 
     ``weights``: per device (row-major device order), per local expert (Wg [H, I], Wu [H, I], Wd [I, H]); a callable
-    returning that; or ``"uninitialized"`` (perf runs: weight tensors of the right spec, no packing / upload, garbage
-    outputs). ``gids``: per device, the local experts' global ids (rows of the routing's counts / regions).
+    returning that; a PackedFlatWeights (one device's experts, packed: the same on every device); or
+    ``"uninitialized"`` (perf runs: weight tensors of the right spec, no packing / upload, garbage outputs). ``gids``: per device, the local experts' global ids (rows of the routing's counts / regions).
+    ``keep_packed``: the same experts on every device are kept packed on the host as ``self.packed`` (a
+    PackedFlatWeights another FlatRoutedExpert on the same plan takes, e.g. after the mesh is reopened).
     ``layout``: FlatLayoutOptions fields (dict) or a FlatLayoutOptions. ``done_buffer_type``: L1 or L1_SMALL."""
 
     def __init__(
@@ -207,6 +240,7 @@ class FlatRoutedExpert:
         pin=1,
         layout=None,
         done_buffer_type=None,
+        keep_packed=False,
     ):
         mb = _moe_block()
         E, n_dev = len(gids[0]), len(gids)
@@ -219,20 +253,30 @@ class FlatRoutedExpert:
         lay = self.plan.as_dict()
         self.lay = lay
         dtype, banks = W_DTYPES[wdtype], lay["banks"]
-        if isinstance(weights, str):
+        self.packed = None
+        if callable(weights):
+            weights = weights()
+        if isinstance(weights, PackedFlatWeights):
+            assert weights.lay == lay, "the packed weights were cut for another plan"
+            self.packed = weights
+            self.w_gu, self.w_d = upload_flat_weights(weights, mesh_device)
+        elif isinstance(weights, str):
             assert weights == "uninitialized", weights
             shapes = flat_weight_shapes(H, I, E, lay)
             self.w_gu, self.w_d = (
                 uninitialized_bank_sharded(*shapes[n], banks, dtype, mesh_device) for n in ("w_gu", "w_d")
             )
         else:
-            weights = weights() if callable(weights) else weights
             assert len(weights) == n_dev and all(len(w_) == E for w_ in weights)
             # every device the same experts (e.g. a test's one expert set everywhere): pack once, replicate
             same = n_dev > 1 and all(all(a is b for a, b in zip(w_, weights[0])) for w_ in weights[1:])
-            packed = [flat_weight_regions(W_l, lay) for W_l in (weights[:1] if same else weights)]
-            self.w_gu = bank_sharded([p[0] for p in packed], banks, dtype, mesh_device, replicate=same)
-            self.w_d = bank_sharded([p[1] for p in packed], banks, dtype, mesh_device, replicate=same)
+            if same and keep_packed:
+                self.packed = pack_flat_weights(weights[0], lay, dtype)
+                self.w_gu, self.w_d = upload_flat_weights(self.packed, mesh_device)
+            else:
+                packed = [flat_weight_regions(W_l, lay) for W_l in (weights[:1] if same else weights)]
+                self.w_gu = bank_sharded([p[0] for p in packed], banks, dtype, mesh_device, replicate=same)
+                self.w_d = bank_sharded([p[1] for p in packed], banks, dtype, mesh_device, replicate=same)
         gid_host = torch.tensor(gids, dtype=torch.int32).reshape(n_dev, 1, E)
         self.gidx = ttnn.from_torch(
             gid_host if n_dev > 1 else gid_host[0],

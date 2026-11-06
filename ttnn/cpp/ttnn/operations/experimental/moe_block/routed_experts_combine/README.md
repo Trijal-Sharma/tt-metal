@@ -71,5 +71,6 @@ are patched on a hit (BufferBinding).
 ## Tests
 
 * `test_routed_experts_combine_host.py`: the credit policy and `combine_auto`'s invariants; no device.
-* `test_routed_experts_combine.py`: device, bit-exact vs saved reference cases (GLM-5.3 / K3 at 8x4, chunk 5120,
-  uniform routing, snap 2^-14; a miss and two hits).
+* `test_experts_combine_checks.py`: device (Galaxy), the op on the real fused head's and dispatch's outputs, snap
+  2^-14, uniform and zipf routing (GLM-5.3 / Kimi-K3 / DeepSeek V4.1-Flash): accuracy vs torch, determinism, a re-routing
+  (uniform -> zipf -> uniform, the second uniform bit-identical to the first) and traced device time.

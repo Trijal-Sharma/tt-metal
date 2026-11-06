@@ -105,5 +105,5 @@ source:
 
 ## Tests
 
-- `test_fused_head.py` (a Galaxy, `MOE_BLOCK_REFS`): bit-exact against saved reference cases, and every output
-  bit-identical call to call.
+- `tests/ttnn/unit_tests/operations/experimental/moe_block/test_fused_head_tail_lb.py` (a LoudBox, SP 2 x TP 4; GLM-5.3 and Kimi-K3): accuracy vs torch,
+  determinism and traced device time.

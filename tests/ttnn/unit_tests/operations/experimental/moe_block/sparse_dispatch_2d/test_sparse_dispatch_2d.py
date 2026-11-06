@@ -7,11 +7,8 @@
   FABRIC_2D_TORUS_XY), bit-exact against the torch model of the result (sparse_dispatch_2d_inputs.assert_dispatched: the
   destinations' rows; pass-through chips may keep the home's row);
   a second call on new buffers must hit the program cache and patch the addresses.
-- test_reference_case: bit-exact against saved reference outputs; runs only with $MOE_BLOCK_REFS set.
 """
 
-import json
-import os
 import sys
 from pathlib import Path
 
@@ -21,12 +18,9 @@ import torch
 import ttnn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import sparse_dispatch_2d_inputs as inputs  # noqa: E402
-from ref_harness import assert_bit_exact, case_dir, from_mesh, list_cases, load_case, to_mesh  # noqa: E402
 
 mb = ttnn.experimental.moe_block
-OP = "sparse_dispatch_2d"
 CHUNK = 5120  # tokens of the mesh a call (S = CHUNK / N a chip)
 TOP_K = 8
 
@@ -67,16 +61,37 @@ def _inputs(mesh_device, resources, width, seed):
     return S, per_chip, (xbuf_in, route)
 
 
+def _to_mesh(per_chip, name, mesh_device, dtype):
+    """A mesh tensor whose chip (r, c) holds per_chip[(r, c)][name], row-major DRAM."""
+    R, C = tuple(mesh_device.shape)
+    stacked = torch.cat([per_chip[(i // C, i % C)][name].unsqueeze(0) for i in range(R * C)], dim=0)
+    t = ttnn.from_torch(
+        stacked,
+        dtype=dtype,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
+        device=mesh_device,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        mesh_mapper=ttnn.shard_tensor_to_mesh_mapper(mesh_device, dim=0),
+    )
+    return ttnn.reshape(t, list(t.shape)[1:])
+
+
+def _from_mesh(tensor, mesh_shape):
+    """Per-chip host copies of a mesh tensor, keyed (r, c)."""
+    R, C = mesh_shape
+    return {(i // C, i % C): ttnn.to_torch(s) for i, s in enumerate(ttnn.get_device_tensors(tensor))}
+
+
 def _to_device(per_chip, mesh_device):
-    xbuf = to_mesh(per_chip, "xbuf_in", mesh_device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
-    route = to_mesh(per_chip, "route", mesh_device, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT)
+    xbuf = _to_mesh(per_chip, "xbuf_in", mesh_device, ttnn.bfloat16)
+    route = _to_mesh(per_chip, "route", mesh_device, ttnn.uint32)
     return xbuf, route
 
 
 def _check(mesh_device, xbuf, model):
     R, C = tuple(mesh_device.shape)
     xbuf_in, route = model
-    inputs.assert_dispatched(from_mesh(xbuf, (R, C)), xbuf_in, route, R, C, CHUNK // (R * C))
+    inputs.assert_dispatched(_from_mesh(xbuf, (R, C)), xbuf_in, route, R, C, CHUNK // (R * C))
 
 
 _MESH = _system_mesh()
@@ -109,35 +124,3 @@ def test_dispatch(mesh_device, width):
     assert mesh_device.num_program_cache_entries() == entries, "the second call missed the program cache"
     resources.release()
 
-
-def _ref_params():
-    if not os.environ.get("MOE_BLOCK_REFS"):
-        return [pytest.param(None, None, None, id="no-refs", marks=pytest.mark.skip(reason="MOE_BLOCK_REFS not set"))]
-    cases = list_cases(OP)
-    if not cases:
-        return [pytest.param(None, None, None, id="no-cases", marks=pytest.mark.skip(reason=f"no {OP} cases"))]
-    out = []
-    for case in cases:
-        meta = json.loads((case_dir(OP, case) / "meta.json").read_text())
-        shape = tuple(meta["mesh_shape"])
-        out.append(pytest.param(shape, _device_params(shape, meta["config"]["fabric_payload"]), case, id=case))
-    return out
-
-
-@pytest.mark.parametrize("mesh_device, device_params, case", _ref_params(), indirect=["mesh_device", "device_params"])
-def test_reference_case(mesh_device, case):
-    meta, ref = load_case(OP, case)
-    cfg = meta["config"]
-    R, C = tuple(mesh_device.shape)
-    topo_wrap = (bool(cfg["torus"][0]) and C > 2, bool(cfg["torus"][1]) and R > 2)
-    resources = _resources(mesh_device, cfg["width"])
-    assert (
-        resources.topology["wrap_x"],
-        resources.topology["wrap_y"],
-    ) == topo_wrap, "fabric wrap differs from the case"
-    xbuf, route = _to_device(ref, mesh_device)
-    out = mb.sparse_dispatch_2d(xbuf, route, resources, group=cfg["group"], manifest_batch=cfg["manifest_batch"])
-    ttnn.synchronize_device(mesh_device)
-    got = {ch: {"xbuf": t} for ch, t in from_mesh(out, (R, C)).items()}
-    assert_bit_exact(got, ref, ["xbuf"])
-    resources.release()
